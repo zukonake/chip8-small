@@ -77,7 +77,7 @@ void load_font() {
 
 U8 *get_mem(U16 addr) {
     if(addr >= MEMORY_SIZE) {
-        fprintf(stderr, "address out of bounds %x/%x\n", addr, MEMORY_SIZE);
+        fprintf(stderr, "address out of bounds %04x/%04x\n", addr, MEMORY_SIZE);
         exit(EXIT_FAILURE);
     }
     return &M[addr];
@@ -110,7 +110,7 @@ U8 read_key(U8 key) {
 
 void mem_store(U8 len) {
     if(I + len >= MEMORY_SIZE) {
-        fprintf(stderr, "mem_store address overflow %x\n", I + len);
+        fprintf(stderr, "mem_store address overflow %04x\n", I + len);
         exit(EXIT_FAILURE);
     }
     memcpy(M + I, V, len + 1);
@@ -118,7 +118,7 @@ void mem_store(U8 len) {
 
 void mem_load(U8 len) {
     if(I + len >= MEMORY_SIZE) {
-        fprintf(stderr, "mem_load address overflow %x\n", I + len);
+        fprintf(stderr, "mem_load address overflow %04x\n", I + len);
         exit(EXIT_FAILURE);
     }
     memcpy(V, M + I, len + 1);
