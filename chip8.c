@@ -29,13 +29,12 @@ U8 ST = 0;
 
 #define SCREEN_W 64u
 #define SCREEN_H 32u
-#define SCREEN_SURF (SCREEN_W * SCREEN_H)
 #define SCREEN_SCALE 16u
 
 #define FILL_COL  0xFFFFFFFFu
 #define EMPTY_COL 0x00000000u
 
-bool screen[SCREEN_SURF] = {false};
+bool screen[SCREEN_W * SCREEN_H] = {false};
 bool keys[16] = {false};
 
 bool running = true;
@@ -72,7 +71,7 @@ void load_font() {
         0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
         0xF0, 0x80, 0xF0, 0x80, 0x80  // F
     };
-    memcpy(M + FONT_START, font_set, 16 * FONT_WIDTH);
+    memcpy(M + FONT_START, font_set, sizeof font_set);
 }
 
 void draw_sprite(U8 s_x, U8 s_y, U8 bytes) {
@@ -145,12 +144,10 @@ void exec_opcode() {
     switch((opcode & 0xF000) >> 12) {
         case 0x0: switch(opcode & 0x00FF) {
             case 0x00: chip8_stop();                               break;
-            case 0xE0: memset(screen, EMPTY_COL, SCREEN_SURF);
+            case 0xE0: memset(screen, EMPTY_COL, sizeof screen);
                        SDL_FillRect(win_surface, NULL, EMPTY_COL); break;
             case 0xEE: PC = S[SP--];                               break;
-            default:
-                fprintf(stderr, "invalid opcode: %x", opcode);
-                exit(EXIT_FAILURE);
+            default: goto error_opcode;
         } break;
         case 0x1: PC = addr;                     break;
         case 0x2: S[++SP] = PC; PC = addr;       break;
@@ -174,9 +171,7 @@ void exec_opcode() {
                       *Vx = *Vy - *Vx;           break;
             case 0xE: V[0xF] = (*Vy & 0x80) >> 7; 
                       *Vx <<= 1;                 break;
-            default:
-                fprintf(stderr, "invalid opcode: %x", opcode);
-                exit(EXIT_FAILURE);
+            default: goto error_opcode;
         } break;
         case 0x9: *Vx != *Vy ? PC += 2 : 0;           break;
         case 0xA: I = addr;                           break;
@@ -186,9 +181,7 @@ void exec_opcode() {
         case 0xE: switch(opcode & 0x00FF) {
             case 0x9E:  keys[*Vx] ? PC += 2 : 0;      break;
             case 0xA1: !keys[*Vx] ? PC += 2 : 0;      break;
-            default:
-                fprintf(stderr, "invalid opcode: %x", opcode);
-                exit(EXIT_FAILURE);
+            default: goto error_opcode;
         } break;
         case 0xF: switch(opcode & 0x00FF) {
             case 0x07: *Vx = DT;                          break;
@@ -202,14 +195,15 @@ void exec_opcode() {
                        M[I + 2] = (*Vx % 10);             break;
             case 0x55: memcpy(M + I, V    , x + 1);       break;
             case 0x65: memcpy(V    , M + I, x + 1);       break;
-            default:
-                fprintf(stderr, "invalid opcode: %x", opcode);
-                exit(EXIT_FAILURE);
+            default: goto error_opcode;
         } break;
         default:
-            fprintf(stderr, "invalid opcode: %x", opcode);
-            exit(EXIT_FAILURE);
     }
+    return;
+
+error_opcode:
+    fprintf(stderr, "invalid opcode: %x", opcode);
+    exit(EXIT_FAILURE);
 }
 
 void poll_keys() {
@@ -240,10 +234,6 @@ void poll_keys() {
     }
 }
 
-void render_screen() {
-    SDL_UpdateWindowSurface(window);
-}
-
 void beep() {
     printf("BEEP!\n");
 }
@@ -255,8 +245,8 @@ void start() {
     while(running) {
         t = clock();
         poll_keys();
-        render_screen();
         exec_opcode();
+        SDL_UpdateWindowSurface(window);
         t = clock() - t;
         double delta = (double)t / CLOCKS_PER_SEC;
         double tick = fabs((1.0 / 540.0) - delta);
@@ -288,9 +278,35 @@ void start() {
 }
 
 void close_file() {
-    if(fclose(file) == EOF) {
-        fprintf(stderr, "failed to close file\n");
+    if(fclose(file) == EOF) fprintf(stderr, "failed to close file\n");
+}
+
+void load_file(const char *path) {
+#define BUFF_SIZE (MEMORY_SIZE - ROM_START)
+    U8 buff[BUFF_SIZE] = {0};
+    file = fopen(path, "rb");
+    if(file == NULL) {
+        fprintf(stderr, "couldn't open input file");
+        exit(EXIT_FAILURE);
     }
+    atexit(&close_file);
+    fseek(file, 0, SEEK_END);
+    size_t len = ftell(file);
+    if(len == 0) {
+        fprintf(stderr, "file is empty");
+        exit(EXIT_FAILURE);
+    }
+    if(len > sizeof buff) {
+        fprintf(stderr, "file is too long %zx/%zx", len, sizeof buff);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 0, SEEK_SET);
+
+    if(len != fread(buff, 1, BUFF_SIZE, file)) {
+        fprintf(stderr, "failed to read input file");
+        exit(EXIT_FAILURE);
+    }
+    memcpy(M + ROM_START, buff, sizeof buff);
 }
 
 void deinit_sdl() {
@@ -300,42 +316,38 @@ void deinit_sdl() {
 }
 
 void init_sdl() {
-    if(SDL_Init(SDL_INIT_VIDEO) < 0) {
-        fprintf(stderr, "couldn't initialize SDL\n");
-        exit(EXIT_FAILURE);
-    }
+    if(SDL_Init(SDL_INIT_VIDEO) < 0) goto error;
     window = SDL_CreateWindow("chip8",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         SCREEN_W * SCREEN_SCALE, SCREEN_H * SCREEN_SCALE, SDL_WINDOW_SHOWN);
-    if(window == NULL) {
-        fprintf(stderr, "couldn't create SDL window\n");
-        exit(EXIT_FAILURE);
-    }
+    if(window == NULL) goto error_sdl;
     win_surface = SDL_GetWindowSurface(window);
+    if(win_surface == NULL) goto error_sdl_window;
     buff_surface = SDL_CreateRGBSurface(0, SCREEN_W, SCREEN_H, 32, 0, 0, 0, 0);
+    if(buff_surface == NULL) goto error_sdl_window;
+    atexit(&deinit_sdl);
+    return;
+
+error_sdl_window:
+    SDL_DestroyWindow(window);
+error_sdl:
+    fprintf(stderr, "SDL error: %s\n", SDL_GetError());
+    SDL_Quit();
+error:
+    exit(EXIT_FAILURE);
 }
 
 int main(int argc, char **argv) {
     if(argc != 2) {
-        fprintf(stderr, "usage: chip8 <file>\n");
+        fprintf(stderr, "usage: chip8 <input_file>\n");
         return EXIT_FAILURE;
     }
-#define BUFF_SIZE (MEMORY_SIZE - ROM_START)
-    U8 buff[BUFF_SIZE] = {0};
-    file = fopen(argv[1], "rb");
-    if(file == NULL) {
-        fprintf(stderr, "couldn't open input file");
-        return EXIT_FAILURE;
-    }
-    atexit(&close_file);
-    fread(buff, 1, BUFF_SIZE, file);
-    memcpy(M + ROM_START, buff, BUFF_SIZE);
+    load_file(argv[1]);
     init_sdl();
-    atexit(&deinit_sdl);
-    signal(SIGINT, &chip8_stop);
 
     srand(time(NULL));
     load_font();
+    signal(SIGINT, &chip8_stop);
     start();
 
     return EXIT_SUCCESS;
