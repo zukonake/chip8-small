@@ -14,6 +14,7 @@ typedef uint32_t U32;
 
 #define MEMORY_SIZE 4096u
 #define ROM_START   512u
+#define STACK_SIZE  16u
 
 U8 M[MEMORY_SIZE] = {0};
 U8 V[16]  = {0};
@@ -21,8 +22,8 @@ U8 V[16]  = {0};
 U16 I  = 0;
 U16 PC = ROM_START;
 
-U16 S[16] = {0};
-U8  SP    = 0;
+U16 S[STACK_SIZE] = {0};
+U8  SP            =  0;
 
 U8 DT = 0;
 U8 ST = 0;
@@ -74,13 +75,62 @@ void load_font() {
     memcpy(M + FONT_START, font_set, sizeof font_set);
 }
 
+U8 *get_mem(U16 addr) {
+    if(addr >= MEMORY_SIZE) {
+        fprintf(stderr, "address out of bounds %x/%x\n", addr, MEMORY_SIZE);
+        exit(EXIT_FAILURE);
+    }
+    return &M[addr];
+}
+
+void stack_push(U16 addr) {
+    if(++SP >= STACK_SIZE) {
+        fprintf(stderr, "stack overflow\n");
+        exit(EXIT_FAILURE);
+    }
+    S[++SP] = PC;
+    PC = addr;
+}
+
+void stack_pop() {
+    if(SP == 0) {
+        fprintf(stderr, "stack underflow\n");
+        exit(EXIT_FAILURE);
+    }
+    PC = S[SP--];
+}
+
+U8 read_key(U8 key) {
+    if(key > 0xF) {
+        fprintf(stderr, "invalid key %x\n", key);
+        exit(EXIT_FAILURE);
+    }
+    return keys[key];
+}
+
+void mem_store(U8 len) {
+    if(I + len >= MEMORY_SIZE) {
+        fprintf(stderr, "mem_store address overflow %x\n", I + len);
+        exit(EXIT_FAILURE);
+    }
+    memcpy(M + I, V, len + 1);
+}
+
+void mem_load(U8 len) {
+    if(I + len >= MEMORY_SIZE) {
+        fprintf(stderr, "mem_load address overflow %x\n", I + len);
+        exit(EXIT_FAILURE);
+    }
+    memcpy(V, M + I, len + 1);
+}
+
 void draw_sprite(U8 s_x, U8 s_y, U8 bytes) {
     V[0xF] = 0;
     SDL_LockSurface(win_surface);
     for(U16 i_y = 0; i_y < bytes; ++i_y) {
         U16 y = s_y + i_y;
         y -= (y / SCREEN_H) * SCREEN_H;
-        U8 mem_val = M[I + i_y];
+        U8 mem_val = *get_mem(I + i_y);
         for(U16 i_x = 0; i_x < 8; ++i_x) {
             if((mem_val & (1 << (7 - i_x))) >> (7 - i_x)) {
                 U16 x = s_x + i_x;
@@ -132,7 +182,7 @@ U8 await_keypress() {
 }
 
 void exec_opcode() {
-    U16 opcode = ((U16)M[PC] << 8) | M[PC + 1];
+    U16 opcode = ((U16)*get_mem(PC) << 8) | *get_mem(PC + 1);
     PC += 2;
     U16 addr   = opcode &  0x0FFF;
     U8  byte   = opcode &  0x00FF;
@@ -146,11 +196,11 @@ void exec_opcode() {
             case 0x00: chip8_stop();                               break;
             case 0xE0: memset(screen, EMPTY_COL, sizeof screen);
                        SDL_FillRect(win_surface, NULL, EMPTY_COL); break;
-            case 0xEE: PC = S[SP--];                               break;
+            case 0xEE: stack_pop();                                break;
             default: goto error_opcode;
         } break;
         case 0x1: PC = addr;                     break;
-        case 0x2: S[++SP] = PC; PC = addr;       break;
+        case 0x2: stack_push(addr)       ;       break;
         case 0x3: *Vx == byte ? PC += 2 : 0;     break;
         case 0x4: *Vx != byte ? PC += 2 : 0;     break;
         case 0x5: *Vx == *Vy  ? PC += 2 : 0;     break;
@@ -179,8 +229,8 @@ void exec_opcode() {
         case 0xC: *Vx = (rand() % 256) & byte;        break;
         case 0xD: draw_sprite(*Vx, *Vy, n);           break;
         case 0xE: switch(opcode & 0x00FF) {
-            case 0x9E:  keys[*Vx] ? PC += 2 : 0;      break;
-            case 0xA1: !keys[*Vx] ? PC += 2 : 0;      break;
+            case 0x9E:  read_key(*Vx) ? PC += 2 : 0;  break;
+            case 0xA1: !read_key(*Vx) ? PC += 2 : 0;  break;
             default: goto error_opcode;
         } break;
         case 0xF: switch(opcode & 0x00FF) {
@@ -190,19 +240,19 @@ void exec_opcode() {
             case 0x18: ST = *Vx;                          break;
             case 0x1E: I += *Vx;                          break;
             case 0x29: I = *Vx * FONT_WIDTH + FONT_START; break;
-            case 0x33: M[I + 0] =  *Vx / 100;
-                       M[I + 1] = (*Vx % 100) / 10;
-                       M[I + 2] = (*Vx % 10);             break;
-            case 0x55: memcpy(M + I, V    , x + 1);       break;
-            case 0x65: memcpy(V    , M + I, x + 1);       break;
+            case 0x33: *get_mem(I + 0) =  *Vx / 100;
+                       *get_mem(I + 1) = (*Vx % 100) / 10;
+                       *get_mem(I + 2) = (*Vx % 10);      break;
+            case 0x55: mem_store(x);                      break;
+            case 0x65: mem_load (x);                      break;
             default: goto error_opcode;
         } break;
-        default:
+        default: goto error_opcode;
     }
     return;
 
 error_opcode:
-    fprintf(stderr, "invalid opcode: %x", opcode);
+    fprintf(stderr, "invalid opcode: %x\n", opcode);
     exit(EXIT_FAILURE);
 }
 
@@ -249,28 +299,31 @@ void start() {
         SDL_UpdateWindowSurface(window);
         t = clock() - t;
         double delta = (double)t / CLOCKS_PER_SEC;
-        double tick = fabs((1.0 / 540.0) - delta);
-        SDL_Delay(tick);
-        if(DT > 0) {
-            dt_cycle += (2.0 * delta + tick);
-            while(dt_cycle > 1.0 / 60.0) {
-                --DT;
-                dt_cycle -= 1.0 / 60.0;
-                if(DT == 0) {
-                    dt_cycle = 0.0;
-                    break;
+        double tick = (1.0 / 540.0) - delta;
+        if(tick > 0)
+        {
+            SDL_Delay(tick * 1000);
+            if(DT > 0) {
+                dt_cycle += (2.0 * delta + tick);
+                while(dt_cycle > 1.0 / 60.0) {
+                    --DT;
+                    dt_cycle -= 1.0 / 60.0;
+                    if(DT == 0) {
+                        dt_cycle = 0.0;
+                        break;
+                    }
                 }
             }
-        }
-        if(ST > 0) {
-            st_cycle += (2.0 * delta + tick);
-            while(st_cycle > 1.0 / 60.0) {
-                --ST;
-                st_cycle -= 1.0 / 60.0;
-                if(ST == 0) {
-                    st_cycle = 0.0;
-                    beep();
-                    break;
+            if(ST > 0) {
+                st_cycle += (2.0 * delta + tick);
+                while(st_cycle > 1.0 / 60.0) {
+                    --ST;
+                    st_cycle -= 1.0 / 60.0;
+                    if(ST == 0) {
+                        st_cycle = 0.0;
+                        beep();
+                        break;
+                    }
                 }
             }
         }
@@ -286,24 +339,24 @@ void load_file(const char *path) {
     U8 buff[BUFF_SIZE] = {0};
     file = fopen(path, "rb");
     if(file == NULL) {
-        fprintf(stderr, "couldn't open input file");
+        fprintf(stderr, "couldn't open input file\n");
         exit(EXIT_FAILURE);
     }
     atexit(&close_file);
     fseek(file, 0, SEEK_END);
     size_t len = ftell(file);
     if(len == 0) {
-        fprintf(stderr, "file is empty");
+        fprintf(stderr, "file is empty\n");
         exit(EXIT_FAILURE);
     }
     if(len > sizeof buff) {
-        fprintf(stderr, "file is too long %zx/%zx", len, sizeof buff);
+        fprintf(stderr, "file is too long %zx/%zx\n", len, sizeof buff);
         exit(EXIT_FAILURE);
     }
     fseek(file, 0, SEEK_SET);
 
     if(len != fread(buff, 1, BUFF_SIZE, file)) {
-        fprintf(stderr, "failed to read input file");
+        fprintf(stderr, "failed to read input file\n");
         exit(EXIT_FAILURE);
     }
     memcpy(M + ROM_START, buff, sizeof buff);
